@@ -66,15 +66,18 @@ function apiHeaders(token, extra) {
 
 function apiCall(method, url, body, headers) {
   return new Promise((resolve) => {
-    const opts = { method, headers };
-    if (body) opts.body = JSON.stringify(body);
-    https.request(url, opts, (res) => {
+    const parsed = new URL(url);
+    const opts = { hostname: parsed.hostname, path: parsed.pathname + parsed.search, method, headers };
+    const req = https.request(opts, (res) => {
       let data = '';
       res.on('data', (c) => data += c);
       res.on('end', () => {
         try { resolve(JSON.parse(data)); } catch(e) { resolve(null); }
       });
-    }).on('error', () => resolve(null)).end();
+    });
+    req.on('error', () => resolve(null));
+    if (body) req.write(JSON.stringify(body));
+    req.end();
   });
 }
 
