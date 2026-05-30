@@ -1,5 +1,5 @@
-// MovieBox Cloudflare Worker
-// Pure JS MD5 (Cloudflare Workers don't have native MD5)
+// MovieBox Cloudflare Worker - Debug Version
+// Returns error details for troubleshooting
 
 const TMDB_KEY = 'd131017ccc6e5462a81c9304d21476de';
 const H5_API = 'https://h5-api.aoneroom.com';
@@ -12,7 +12,6 @@ const corsHeaders = {
   'Content-Type': 'application/json'
 };
 
-// Pure JS MD5 implementation
 function md5(string) {
   function md5cycle(x, k) {
     var a = x[0], b = x[1], c = x[2], d = x[3];
@@ -52,15 +51,15 @@ function md5(string) {
   return hex(md51(string));
 }
 
-async function genClientToken() {
-  const ts = Math.floor(Date.now() / 1000).toString();
-  const rev = ts.split('').reverse().join('');
-  const hash = md5(rev);
+function genClientToken() {
+  var ts = Math.floor(Date.now() / 1000).toString();
+  var rev = ts.split('').reverse().join('');
+  var hash = md5(rev);
   return ts + '.' + hash;
 }
 
 function apiHeaders(token, extra) {
-  const h = {
+  var h = {
     'Accept': 'application/json',
     'Content-Type': 'application/json',
     'Origin': SITE,
@@ -70,22 +69,23 @@ function apiHeaders(token, extra) {
     'x-request-lang': 'en',
     'X-Client-Token': token
   };
-  if (extra) Object.assign(h, extra);
+  if (extra) { for (var k in extra) h[k] = extra[k]; }
   return h;
 }
 
 async function apiCall(method, url, body, headers) {
-  const opts = { method, headers };
+  var opts = { method: method, headers: headers };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(url, opts);
-  if (!res.ok) return null;
-  try { return await res.json(); } catch(e) { return null; }
+  var res = await fetch(url, opts);
+  var text = await res.text();
+  if (!res.ok) return { error: 'HTTP ' + res.status, body: text.substring(0, 200) };
+  try { return JSON.parse(text); } catch(e) { return { error: 'Not JSON', body: text.substring(0, 200) }; }
 }
 
 async function getTmdb(tmdbId, type) {
-  const mt = type === 'tv' ? 'tv' : 'movie';
-  const res = await fetch(`https://api.themoviedb.org/3/${mt}/${tmdbId}?api_key=${TMDB_KEY}`);
-  const d = await res.json();
+  var mt = type === 'tv' ? 'tv' : 'movie';
+  var res = await fetch('https://api.themoviedb.org/3/' + mt + '/' + tmdbId + '?api_key=' + TMDB_KEY);
+  var d = await res.json();
   return {
     title: mt === 'movie' ? (d.title || d.original_title) : (d.name || d.original_name),
     year: (d.release_date || d.first_air_date || '').substring(0, 4),
@@ -104,9 +104,9 @@ function normTitle(s) {
 
 function extractLang(title) {
   if (!title) return 'Original';
-  const m = title.match(/\[([^\]]+)\]/);
+  var m = title.match(/\[([^\]]+)\]/);
   if (m) {
-    const lang = m[1].trim();
+    var lang = m[1].trim();
     return lang.toLowerCase().indexOf('dub') >= 0 ? lang : lang + ' Dub';
   }
   return 'Original';
@@ -118,18 +118,19 @@ function baseTitle(title) {
 }
 
 function findMatches(items, tmdbTitle, tmdbYear, mediaType) {
-  const norm = normTitle(tmdbTitle);
-  const target = mediaType === 'movie' ? 1 : 2;
-  const results = [];
-  const seen = {};
-  for (const it of items) {
+  var norm = normTitle(tmdbTitle);
+  var target = mediaType === 'movie' ? 1 : 2;
+  var results = [];
+  var seen = {};
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
     if (it.subjectType !== target || seen[it.subjectId]) continue;
-    const bt = baseTitle(it.title);
-    const nt = normTitle(bt);
-    const yr = it.year || (it.releaseDate ? it.releaseDate.substring(0, 4) : null);
-    let score = 0;
+    var bt = baseTitle(it.title);
+    var nt = normTitle(bt);
+    var yr = it.year || (it.releaseDate ? it.releaseDate.substring(0, 4) : null);
+    var score = 0;
     if (nt === norm) score += 50;
-    else if (nt.includes(norm) || norm.includes(nt)) score += 15;
+    else if (nt.indexOf(norm) >= 0 || norm.indexOf(nt) >= 0) score += 15;
     if (tmdbYear && yr && tmdbYear == yr) score += 35;
     if (score >= 40) {
       seen[it.subjectId] = true;
@@ -141,37 +142,40 @@ function findMatches(items, tmdbTitle, tmdbYear, mediaType) {
       });
     }
   }
-  results.sort((a, b) => a.lang === 'Original' ? -1 : b.lang === 'Original' ? 1 : 0);
+  results.sort(function(a, b) { return a.lang === 'Original' ? -1 : b.lang === 'Original' ? 1 : 0; });
   return results;
 }
 
 async function getDownloads(token, subjectId, se, ep, detailPath) {
-  let url = `${H5_API}/wefeed-h5api-bff/subject/download?subjectId=${subjectId}`;
-  if (se != null) url += `&se=${se}`;
-  if (ep != null) url += `&ep=${ep}`;
-  const res = await apiCall('GET', url, null, apiHeaders(token, {
-    'Referer': `${SITE}/watch/${detailPath}`
+  var url = H5_API + '/wefeed-h5api-bff/subject/download?subjectId=' + subjectId;
+  if (se != null) url += '&se=' + se;
+  if (ep != null) url += '&ep=' + ep;
+  var res = await apiCall('GET', url, null, apiHeaders(token, {
+    'Referer': SITE + '/watch/' + detailPath
   }));
+  if (res && res.error) return [];
   return (res && res.data && res.data.downloads) || [];
 }
 
 async function getDetail(token, detailPath) {
-  const res = await apiCall('GET', `${H5_API}/wefeed-h5api-bff/detail?detailPath=${detailPath}`, null, apiHeaders(token));
+  var res = await apiCall('GET', H5_API + '/wefeed-h5api-bff/detail?detailPath=' + detailPath, null, apiHeaders(token));
+  if (res && res.error) return null;
   return res && res.data;
 }
 
 function buildStreams(downloads, lang) {
-  const seen = {};
-  const result = [];
-  for (const dl of downloads) {
+  var seen = {};
+  var result = [];
+  for (var i = 0; i < downloads.length; i++) {
+    var dl = downloads[i];
     if (!dl.url || seen[dl.url]) continue;
     seen[dl.url] = true;
-    const qual = (dl.resolution || 'Auto') + 'p';
-    let ft = null;
-    const u = dl.url.toLowerCase();
-    if (u.includes('.m3u8')) ft = 'hls';
-    else if (u.includes('.mp4') || u.includes('.mkv')) ft = 'video';
-    const nameParts = ['MovieBox'];
+    var qual = (dl.resolution || 'Auto') + 'p';
+    var ft = null;
+    var u = dl.url.toLowerCase();
+    if (u.indexOf('.m3u8') >= 0) ft = 'hls';
+    else if (u.indexOf('.mp4') >= 0 || u.indexOf('.mkv') >= 0) ft = 'video';
+    var nameParts = ['MovieBox'];
     if (lang && lang !== 'Original') nameParts.push(lang);
     nameParts.push(qual);
     result.push({
@@ -188,75 +192,91 @@ function buildStreams(downloads, lang) {
 }
 
 async function fetchStreams(tmdbId, type, season, episode) {
-  const details = await getTmdb(tmdbId, type);
-  if (!details) return [];
+  var log = [];
+  log.push('Starting fetch for tmdbId=' + tmdbId + ' type=' + type);
 
-  const token = await genClientToken();
-  const searchRes = await apiCall('POST', `${H5_API}/wefeed-h5api-bff/subject/search`, {
+  var details = await getTmdb(tmdbId, type);
+  if (!details) { log.push('TMDB failed'); return { streams: [], log: log }; }
+  log.push('TMDB: title=' + details.title + ' year=' + details.year);
+
+  var token = genClientToken();
+  log.push('Token: ' + token.substring(0, 30) + '...');
+
+  var searchRes = await apiCall('POST', H5_API + '/wefeed-h5api-bff/subject/search', {
     keyword: details.title, page: 1, perPage: 28, subjectType: 0
   }, apiHeaders(token));
 
-  const items = (searchRes && searchRes.data && searchRes.data.items) || [];
-  const matches = findMatches(items, details.title, details.year, details.mediaType);
-  if (matches.length === 0) return [];
+  if (searchRes && searchRes.error) { log.push('Search error: ' + searchRes.error); return { streams: [], log: log }; }
+  var items = (searchRes && searchRes.data && searchRes.data.items) || [];
+  log.push('Search: ' + items.length + ' items');
 
-  const isTv = details.mediaType === 'tv';
-  const se = isTv ? (parseInt(season) || 1) : 0;
-  const ep = isTv ? (parseInt(episode) || 1) : 0;
+  var matches = findMatches(items, details.title, details.year, details.mediaType);
+  log.push('Matches: ' + matches.length);
+  matches.forEach(function(m) { log.push('  - ' + m.title + ' (' + m.lang + ') id=' + m.id); });
 
-  const seenIds = {};
-  const unique = matches.filter(m => {
+  if (matches.length === 0) return { streams: [], log: log };
+
+  var isTv = details.mediaType === 'tv';
+  var se = isTv ? (parseInt(season) || 1) : 0;
+  var ep = isTv ? (parseInt(episode) || 1) : 0;
+
+  var seenIds = {};
+  var unique = matches.filter(function(m) {
     if (seenIds[m.id]) return false;
     seenIds[m.id] = true;
     return true;
   });
 
-  let detailData = null;
+  var detailData = null;
   if (isTv && unique.length > 0) {
     detailData = await getDetail(token, unique[0].dp);
+    log.push('Detail: ' + (detailData ? 'OK' : 'null'));
   }
 
-  const allStreams = [];
-  const promises = unique.map(async (m) => {
-    let useSe = se, useEp = ep;
+  var allStreams = [];
+  for (var i = 0; i < unique.length; i++) {
+    var m = unique[i];
+    var useSe = se, useEp = ep;
     if (isTv && detailData && detailData.resource && detailData.resource.seasons) {
-      for (const s of detailData.resource.seasons) {
-        if (s.se == se) {
-          if (s.maxEp > 0 && ep > s.maxEp) useEp = s.maxEp;
+      for (var j = 0; j < detailData.resource.seasons.length; j++) {
+        if (detailData.resource.seasons[j].se == se) {
+          if (detailData.resource.seasons[j].maxEp > 0 && ep > detailData.resource.seasons[j].maxEp) {
+            useEp = detailData.resource.seasons[j].maxEp;
+          }
           break;
         }
       }
     }
-    const dls = await getDownloads(token, m.id, useSe, useEp, m.dp);
-    return buildStreams(dls, m.lang);
-  });
+    var dls = await getDownloads(token, m.id, useSe, useEp, m.dp);
+    log.push('Downloads ' + m.lang + ': ' + dls.length + ' items');
+    var streams = buildStreams(dls, m.lang);
+    allStreams = allStreams.concat(streams);
+  }
 
-  const results = await Promise.all(promises);
-  for (const r of results) allStreams.push(...r);
-
-  allStreams.sort((a, b) => {
-    const qa = parseInt(a.quality) || 0;
-    const qb = parseInt(b.quality) || 0;
+  allStreams.sort(function(a, b) {
+    var qa = parseInt(a.quality) || 0;
+    var qb = parseInt(b.quality) || 0;
     if (qb !== qa) return qb - qa;
-    return a.name.includes('Original') ? -1 : 1;
+    return a.name.indexOf('Original') >= 0 ? -1 : 1;
   });
 
-  return allStreams;
+  return { streams: allStreams, log: log };
 }
 
 export default {
   async fetch(request) {
-    const url = new URL(request.url);
+    var url = new URL(request.url);
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders });
     }
 
     if (url.pathname === '/streams') {
-      const tmdbId = url.searchParams.get('tmdb_id');
-      const type = url.searchParams.get('type') || 'movie';
-      const season = url.searchParams.get('season');
-      const episode = url.searchParams.get('episode');
+      var tmdbId = url.searchParams.get('tmdb_id');
+      var type = url.searchParams.get('type') || 'movie';
+      var season = url.searchParams.get('season');
+      var episode = url.searchParams.get('episode');
+      var debug = url.searchParams.get('debug');
 
       if (!tmdbId) {
         return new Response(JSON.stringify({ error: 'Provide tmdb_id' }), {
@@ -265,25 +285,12 @@ export default {
       }
 
       try {
-        const cacheKey = `https://moviebox-cache.devonwhite1020.workers.dev/${tmdbId}:${type}:${season || 0}:${episode || 0}`;
-        const cache = caches.default;
-        const cached = await cache.match(cacheKey);
-        if (cached) {
-          const data = await cached.json();
-          return new Response(JSON.stringify(data), { headers: corsHeaders });
-        }
-
-        const streams = await fetchStreams(tmdbId, type, season, episode);
-        const response = { streams };
-
-        const cacheResponse = new Response(JSON.stringify(response), {
-          headers: { ...corsHeaders, 'Cache-Control': 'max-age=1200' }
-        });
-        await cache.put(cacheKey, cacheResponse.clone());
-
+        var result = await fetchStreams(tmdbId, type, season, episode);
+        var response = { streams: result.streams };
+        if (debug) response.log = result.log;
         return new Response(JSON.stringify(response), { headers: corsHeaders });
       } catch (err) {
-        return new Response(JSON.stringify({ error: err.message, streams: [] }), {
+        return new Response(JSON.stringify({ error: err.message, streams: [], log: [err.stack] }), {
           status: 500, headers: corsHeaders
         });
       }
@@ -291,7 +298,7 @@ export default {
 
     return new Response(JSON.stringify({
       name: 'MovieBox Worker',
-      usage: '/streams?tmdb_id=XXX&type=movie|tv&season=1&episode=1'
+      usage: '/streams?tmdb_id=XXX&type=movie|tv&season=1&episode=1&debug=1'
     }), { headers: corsHeaders });
   }
 };
