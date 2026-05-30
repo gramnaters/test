@@ -5,7 +5,7 @@
     {
       "id": "moviebox",
       "name": "MovieBox",
-      "description": "MovieBox - Multi-quality MP4 streams from MovieBox H5 API with TMDB lookup",
+      "description": "MovieBox - Multi-quality streams from inmoviebox.com API with HMAC-MD5 auth",
       "version": "1.0.0",
       "author": "gramnaters",
       "supportedTypes": ["movie", "tv"],
