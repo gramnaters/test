@@ -1,6 +1,8 @@
 // MovieBox Global Scraper for Nuvio
-// Optimized: parallel API calls + in-memory cache
+// Fast: calls Cloudflare Worker (server-cached, ~200ms)
+// Fallback: local API calls with in-memory cache
 
+var WORKER = 'https://moviebox-api.YOUR_SUBDOMAIN.workers.dev';
 var API = "https://h5-api.aoneroom.com";
 var TMDB_KEY = 'd131017ccc6e5462a81c9304d21476de';
 var TMDB_URL = 'https://api.themoviedb.org/3';
@@ -17,10 +19,7 @@ function getCached(key) {
 }
 
 function setCached(key, val) {
-    if (cache.size > 300) {
-        var first = cache.keys().next().value;
-        cache.delete(first);
-    }
+    if (cache.size > 300) { cache.delete(cache.keys().next().value); }
     cache.set(key, { val: val, ts: Date.now() });
 }
 
@@ -89,8 +88,7 @@ function extractLang(title) {
     var m = title.match(/\[([^\]]+)\]/);
     if (m) {
         var lang = m[1].trim();
-        if (lang.toLowerCase().indexOf('dub') >= 0) return lang;
-        return lang + ' Dub';
+        return lang.toLowerCase().indexOf('dub') >= 0 ? lang : lang + ' Dub';
     }
     return "Original";
 }
@@ -202,32 +200,6 @@ function buildStreams(downloads, lang) {
     return result;
 }
 
-function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
-    if (seasonNum == null) seasonNum = 1;
-    if (episodeNum == null) episodeNum = 1;
-
-    return getTmdb(tmdbId, mediaType).then(function(details) {
-        if (!details) return [];
-
-        return searchBox(details.title).then(function(items) {
-            var matches = findMatches(items, details.title, details.year, details.mediaType);
-
-            if (matches.length === 0) {
-                var words = details.title.split(' ');
-                if (words.length > 3) {
-                    return searchBox(words.slice(0, 3).join(' ')).then(function(items2) {
-                        var m2 = findMatches(items2, details.title, details.year, details.mediaType);
-                        return processMatches(m2, details, seasonNum, episodeNum);
-                    });
-                }
-                return [];
-            }
-
-            return processMatches(matches, details, seasonNum, episodeNum);
-        });
-    });
-}
-
 function processMatches(matches, details, seasonNum, episodeNum) {
     var isTv = details.mediaType === 'tv';
     var se = isTv ? (parseInt(seasonNum, 10) || 1) : 0;
@@ -287,6 +259,52 @@ function processMatches(matches, details, seasonNum, episodeNum) {
             return la - lb;
         });
         return all;
+    });
+}
+
+function localFetch(tmdbId, mediaType, seasonNum, episodeNum) {
+    return getTmdb(tmdbId, mediaType).then(function(details) {
+        if (!details) return [];
+        return searchBox(details.title).then(function(items) {
+            var matches = findMatches(items, details.title, details.year, details.mediaType);
+            if (matches.length === 0) {
+                var words = details.title.split(' ');
+                if (words.length > 3) {
+                    return searchBox(words.slice(0, 3).join(' ')).then(function(items2) {
+                        var m2 = findMatches(items2, details.title, details.year, details.mediaType);
+                        return processMatches(m2, details, seasonNum, episodeNum);
+                    });
+                }
+                return [];
+            }
+            return processMatches(matches, details, seasonNum, episodeNum);
+        });
+    });
+}
+
+function workerFetch(tmdbId, mediaType, seasonNum, episodeNum) {
+    var url = WORKER + '/streams?tmdb_id=' + tmdbId + '&type=' + mediaType;
+    if (seasonNum != null) url += '&season=' + seasonNum;
+    if (episodeNum != null) url += '&episode=' + episodeNum;
+    return fetch(url).then(function(r) {
+        return r.json();
+    }).then(function(data) {
+        return (data && data.streams) || [];
+    }).catch(function() {
+        return null;
+    });
+}
+
+function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
+    if (seasonNum == null) seasonNum = 1;
+    if (episodeNum == null) episodeNum = 1;
+    var isTv = (mediaType === 'series' || mediaType === 'tv');
+    var se = isTv ? seasonNum : null;
+    var ep = isTv ? episodeNum : null;
+
+    return workerFetch(tmdbId, mediaType, se, ep).then(function(streams) {
+        if (streams && streams.length > 0) return streams;
+        return localFetch(tmdbId, mediaType, seasonNum, episodeNum);
     });
 }
 
