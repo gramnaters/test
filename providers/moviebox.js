@@ -1,11 +1,28 @@
 // MovieBox Global Scraper for Nuvio
-// Supports all languages (English, Hindi, Tamil, Telugu, etc.)
-// Uses h5-api.aoneroom.com with X-Client-Token + Referer auth
+// Optimized: parallel API calls + in-memory cache
 
 var API = "https://h5-api.aoneroom.com";
 var TMDB_KEY = 'd131017ccc6e5462a81c9304d21476de';
 var TMDB_URL = 'https://api.themoviedb.org/3';
 var SITE = 'https://themoviebox.org';
+
+var cache = new Map();
+var CACHE_TTL = 20 * 60 * 1000;
+
+function getCached(key) {
+    var e = cache.get(key);
+    if (!e) return undefined;
+    if (Date.now() - e.ts > CACHE_TTL) { cache.delete(key); return undefined; }
+    return e.val;
+}
+
+function setCached(key, val) {
+    if (cache.size > 300) {
+        var first = cache.keys().next().value;
+        cache.delete(first);
+    }
+    cache.set(key, { val: val, ts: Date.now() });
+}
 
 function genToken() {
     var ts = Math.floor(Date.now() / 1000).toString();
@@ -41,15 +58,20 @@ function apiCall(method, url, body, extraHdrs) {
 }
 
 function getTmdb(tmdbId, type) {
+    var ck = 'tmdb_' + tmdbId;
+    var c = getCached(ck);
+    if (c) return Promise.resolve(c);
     var mt = (type === 'series' || type === 'tv') ? 'tv' : 'movie';
     return fetch(TMDB_URL + '/' + mt + '/' + tmdbId + '?api_key=' + TMDB_KEY).then(function(r) {
         return r.json();
     }).then(function(d) {
-        return {
+        var result = {
             title: mt === 'movie' ? (d.title || d.original_title) : (d.name || d.original_name),
             year: (d.release_date || d.first_air_date || '').substring(0, 4),
             mediaType: mt
         };
+        setCached(ck, result);
+        return result;
     }).catch(function() { return null; });
 }
 
@@ -79,10 +101,15 @@ function baseTitle(title) {
 }
 
 function searchBox(query) {
+    var ck = 'search_' + query;
+    var c = getCached(ck);
+    if (c) return Promise.resolve(c);
     return apiCall('POST', API + '/wefeed-h5api-bff/subject/search', {
         keyword: query, page: 1, perPage: 28, subjectType: 0
     }).then(function(res) {
-        return (res && res.data && res.data.items) || [];
+        var items = (res && res.data && res.data.items) || [];
+        setCached(ck, items);
+        return items;
     });
 }
 
@@ -91,21 +118,17 @@ function findMatches(items, tmdbTitle, tmdbYear, mediaType) {
     var target = mediaType === 'movie' ? 1 : 2;
     var results = [];
     var seen = {};
-
     for (var i = 0; i < items.length; i++) {
         var it = items[i];
         if (it.subjectType !== target) continue;
         if (seen[it.subjectId]) continue;
-
         var bt = baseTitle(it.title);
         var nt = normTitle(bt);
         var yr = it.year || (it.releaseDate ? it.releaseDate.substring(0, 4) : null);
-
         var score = 0;
         if (nt === norm) score += 50;
         else if (nt.indexOf(norm) >= 0 || norm.indexOf(nt) >= 0) score += 15;
         if (tmdbYear && yr && tmdbYear == yr) score += 35;
-
         if (score >= 40) {
             seen[it.subjectId] = true;
             results.push({
@@ -116,29 +139,39 @@ function findMatches(items, tmdbTitle, tmdbYear, mediaType) {
             });
         }
     }
-
     results.sort(function(a, b) {
         if (a.lang === "Original") return -1;
         if (b.lang === "Original") return 1;
         return 0;
     });
-
     return results;
 }
 
 function getDownloads(subjectId, se, ep, detailPath) {
+    var ck = 'dl_' + subjectId + '_' + se + '_' + ep;
+    var c = getCached(ck);
+    if (c) return Promise.resolve(c);
     var url = API + '/wefeed-h5api-bff/subject/download?subjectId=' + subjectId;
     if (se != null) url += '&se=' + se;
     if (ep != null) url += '&ep=' + ep;
     return apiCall('GET', url, null, {
         'Referer': SITE + '/watch/' + detailPath
     }).then(function(res) {
-        return (res && res.data && res.data.downloads) || [];
+        var dls = (res && res.data && res.data.downloads) || [];
+        setCached(ck, dls);
+        return dls;
     });
 }
 
 function getDetail(detailPath) {
-    return apiCall('GET', API + '/wefeed-h5api-bff/detail?detailPath=' + detailPath);
+    var ck = 'detail_' + detailPath;
+    var c = getCached(ck);
+    if (c) return Promise.resolve(c);
+    return apiCall('GET', API + '/wefeed-h5api-bff/detail?detailPath=' + detailPath).then(function(res) {
+        var data = res && res.data;
+        setCached(ck, data);
+        return data;
+    });
 }
 
 function buildStreams(downloads, lang) {
@@ -209,10 +242,15 @@ function processMatches(matches, details, seasonNum, episodeNum) {
         }
     }
 
+    var detailPromise = null;
+    if (isTv && unique.length > 0) {
+        detailPromise = getDetail(unique[0].dp);
+    }
+
     var promises = unique.map(function(m) {
         if (isTv) {
-            return getDetail(m.dp).then(function(detailRes) {
-                var resource = detailRes && detailRes.data && detailRes.data.resource;
+            return detailPromise.then(function(detailData) {
+                var resource = detailData && detailData.resource;
                 var useSe = se;
                 var useEp = ep;
                 if (resource && resource.seasons) {
