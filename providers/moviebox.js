@@ -1,8 +1,7 @@
 // MovieBox Global Scraper for Nuvio
-// Fast: calls Cloudflare Worker (server-cached, ~200ms)
-// Fallback: local API calls with in-memory cache
+// Supports all languages (English, Hindi, Tamil, Telugu, etc.)
+// Optimized with in-memory cache for instant repeat loads
 
-var WORKER = 'https://moviebox-api.YOUR_SUBDOMAIN.workers.dev';
 var API = "https://h5-api.aoneroom.com";
 var TMDB_KEY = 'd131017ccc6e5462a81c9304d21476de';
 var TMDB_URL = 'https://api.themoviedb.org/3';
@@ -262,11 +261,16 @@ function processMatches(matches, details, seasonNum, episodeNum) {
     });
 }
 
-function localFetch(tmdbId, mediaType, seasonNum, episodeNum) {
+function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
+    if (seasonNum == null) seasonNum = 1;
+    if (episodeNum == null) episodeNum = 1;
+
     return getTmdb(tmdbId, mediaType).then(function(details) {
         if (!details) return [];
+
         return searchBox(details.title).then(function(items) {
             var matches = findMatches(items, details.title, details.year, details.mediaType);
+
             if (matches.length === 0) {
                 var words = details.title.split(' ');
                 if (words.length > 3) {
@@ -277,34 +281,9 @@ function localFetch(tmdbId, mediaType, seasonNum, episodeNum) {
                 }
                 return [];
             }
+
             return processMatches(matches, details, seasonNum, episodeNum);
         });
-    });
-}
-
-function workerFetch(tmdbId, mediaType, seasonNum, episodeNum) {
-    var url = WORKER + '/streams?tmdb_id=' + tmdbId + '&type=' + mediaType;
-    if (seasonNum != null) url += '&season=' + seasonNum;
-    if (episodeNum != null) url += '&episode=' + episodeNum;
-    return fetch(url).then(function(r) {
-        return r.json();
-    }).then(function(data) {
-        return (data && data.streams) || [];
-    }).catch(function() {
-        return null;
-    });
-}
-
-function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
-    if (seasonNum == null) seasonNum = 1;
-    if (episodeNum == null) episodeNum = 1;
-    var isTv = (mediaType === 'series' || mediaType === 'tv');
-    var se = isTv ? seasonNum : null;
-    var ep = isTv ? episodeNum : null;
-
-    return workerFetch(tmdbId, mediaType, se, ep).then(function(streams) {
-        if (streams && streams.length > 0) return streams;
-        return localFetch(tmdbId, mediaType, seasonNum, episodeNum);
     });
 }
 
