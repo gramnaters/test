@@ -1,27 +1,9 @@
-var __async = function(__this, __arguments, generator) {
-  return new Promise(function(resolve, reject) {
-    var fulfilled = function(value) {
-      try {
-        step(generator.next(value));
-      } catch (e) {
-        reject(e);
-      }
-    };
-    var rejected = function(value) {
-      try {
-        step(generator.throw(value));
-      } catch (e) {
-        reject(e);
-      }
-    };
-    var step = function(x) {
-      return x.done ? resolve(x.value) : Promise.resolve(x.value).then(fulfilled, rejected);
-    };
-    step((generator = generator.apply(__this, __arguments)).next());
-  });
-};
+var API_BASE = 'https://h5-api.aoneroom.com';
+var TMDB_KEY = '439c478a771f35c05022f9feabcca01c';
+var TMDB_BASE = 'https://api.themoviedb.org/3';
+var UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+var TAG = '[MovieBox]';
 
-// Pure JS MD5
 function md5(s) {
   function md5cycle(x, k) {
     var a = x[0], b = x[1], c = x[2], d = x[3];
@@ -58,16 +40,8 @@ function md5(s) {
 function generateClientToken() {
   var ts = Math.floor(Date.now() / 1000);
   var rev = String(ts).split('').reverse().join('');
-  var hash = md5(rev);
-  return ts + '.' + hash;
+  return ts + '.' + md5(rev);
 }
-
-var TMDB_KEY = '439c478a771f35c05022f9feabcca01c';
-var TMDB_BASE = 'https://api.themoviedb.org/3';
-var MB_API_BASE = 'https://h5-api.aoneroom.com';
-var MB_WEB_BASE = 'https://h5.aoneroom.com';
-var REFERER_SPOOF = 'https://fmoviesunblocked.net';
-var TAG = '[MovieBox]';
 
 function baseHeaders(extra) {
   var h = {
@@ -75,9 +49,9 @@ function baseHeaders(extra) {
     'X-Request-Lang': 'en',
     'Accept-Language': 'en-US,en;q=0.5',
     'Accept': 'application/json',
-    'Referer': MB_WEB_BASE + '/',
-    'Origin': MB_WEB_BASE,
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'Referer': 'https://h5.aoneroom.com/',
+    'Origin': 'https://h5.aoneroom.com',
+    'User-Agent': UA
   };
   if (extra) {
     for (var key in extra) {
@@ -87,167 +61,133 @@ function baseHeaders(extra) {
   return h;
 }
 
-var cache = {};
-var CACHE_TTL = 20 * 60 * 1000;
-
-function cacheGet(key) {
-  var entry = cache[key];
-  if (!entry) return undefined;
-  if (Date.now() - entry.ts > CACHE_TTL) { delete cache[key]; return undefined; }
-  return entry.value;
-}
-
-function cacheSet(key, value) {
-  var keys = Object.keys(cache);
-  if (keys.length >= 300) delete cache[keys[0]];
-  cache[key] = { value: value, ts: Date.now() };
-}
-
-function escapeRegExp(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function getTmdbInfo(tmdbId, mediaType) {
-  return __async(this, null, function*() {
-    var type = mediaType === 'series' || mediaType === 'tv' ? 'tv' : 'movie';
-    var url = TMDB_BASE + '/' + type + '/' + tmdbId + '?api_key=' + TMDB_KEY;
-    var res = yield fetch(url);
-    var data = yield res.json();
+function fetchTmdbInfo(tmdbId, mediaType) {
+  var type = mediaType === 'tv' ? 'tv' : 'movie';
+  var url = TMDB_BASE + '/' + type + '/' + tmdbId + '?api_key=' + TMDB_KEY;
+  return fetch(url).then(function(r) { return r.json(); }).then(function(data) {
     var title = type === 'tv' ? data.name : data.title;
     var dateStr = type === 'tv' ? data.first_air_date : data.release_date;
     var year = dateStr ? parseInt(dateStr.split('-')[0], 10) : null;
     return { title: title, year: year, type: type };
-  });
+  }).catch(function(e) { return null; });
 }
 
-function searchMovieBox(title, type) {
-  return __async(this, null, function*() {
-    var subjectType = type === 'tv' ? 2 : 1;
-    var res = yield fetch(MB_API_BASE + '/wefeed-h5api-bff/subject/search', {
-      method: 'POST',
-      headers: baseHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ keyword: title, page: 1, perPage: 24, subjectType: subjectType })
-    });
-    var json = yield res.json();
-    var items = json.data && json.data.items ? json.data.items : [];
+function searchMovieBox(title, mediaType) {
+  var subjectType = mediaType === 'tv' ? 2 : 1;
+  return fetch(API_BASE + '/wefeed-h5api-bff/subject/search', {
+    method: 'POST',
+    headers: baseHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ keyword: title, page: 1, perPage: 24, subjectType: subjectType })
+  }).then(function(r) { return r.json(); }).then(function(json) {
+    return json.data && json.data.items ? json.data.items : [];
+  }).catch(function(e) { return []; });
+}
 
-    if (!items.length) return [];
-
-    var SERIES_SUFFIX = /\s+S\d+(?:-S?\d+)*$/i;
-    var escaped = escapeRegExp(title);
-    var matchRe = new RegExp('^' + escaped + '(?: \\[([^\\]]+)\\])?$', 'i');
-    var seen = {};
-    var matched = [];
-
-    for (var i = 0; i < items.length; i++) {
-      var item = items[i];
-      var id = item.subjectId;
-      if (!id || seen[id]) continue;
-      var cleanTitle = (item.title || '').replace(SERIES_SUFFIX, '').trim();
-      var m = cleanTitle.match(matchRe);
-      if (!m) continue;
-      var language = m[1] || 'Original';
-      seen[id] = true;
-      matched.push({ id: id, language: language, detailPath: item.detailPath || '' });
-    }
-
-    matched.sort(function(a, b) {
-      if (a.language === 'Original') return -1;
-      if (b.language === 'Original') return 1;
-      return 0;
-    });
-
-    return matched;
+function findMatch(items, tmdbTitle) {
+  var suffixRe = /\s+S\d+(?:-S?\d+)*$/i;
+  var escaped = (tmdbTitle || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  var matchRe = new RegExp('^' + escaped + '(?: \\[([^\\]]+)\\])?$', 'i');
+  var seen = {};
+  var matched = [];
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var id = item.subjectId;
+    if (!id || seen[id]) continue;
+    var clean = (item.title || '').replace(suffixRe, '').trim();
+    var m = clean.match(matchRe);
+    if (!m) continue;
+    var lang = m[1] || 'Original';
+    seen[id] = true;
+    matched.push({ id: id, language: lang, detailPath: item.detailPath || '' });
+  }
+  matched.sort(function(a, b) {
+    if (a.language === 'Original') return -1;
+    if (b.language === 'Original') return 1;
+    return 0;
   });
+  return matched;
 }
 
 function fetchDownloads(subjectId, detailPath, season, episode) {
-  return __async(this, null, function*() {
-    var qs = 'subjectId=' + subjectId;
-    if (season != null) qs += '&se=' + season;
-    if (episode != null) qs += '&ep=' + episode;
-    var referer = REFERER_SPOOF + '/spa/videoPlayPage/movies/' + detailPath + '?id=' + subjectId + '&type=/movie/detail';
-    var res = yield fetch(MB_API_BASE + '/wefeed-h5api-bff/subject/download?' + qs, {
-      headers: baseHeaders({ Referer: referer })
-    });
-    var json = yield res.json();
+  var qs = 'subjectId=' + subjectId;
+  if (season != null) qs += '&se=' + season;
+  if (episode != null) qs += '&ep=' + episode;
+  var referer = 'https://fmoviesunblocked.net/spa/videoPlayPage/movies/' + detailPath + '?id=' + subjectId + '&type=/movie/detail';
+  return fetch(API_BASE + '/wefeed-h5api-bff/subject/download?' + qs, {
+    headers: baseHeaders({ Referer: referer })
+  }).then(function(r) { return r.json(); }).then(function(json) {
     return json.data && json.data.downloads ? json.data.downloads : [];
-  });
+  }).catch(function(e) { return []; });
 }
 
 function buildStream(dl, language) {
-  var url = dl.url;
-  if (!url) return null;
+  if (!dl.url) return null;
   var res = dl.resolution || 720;
   var quality = res + 'p';
   var name = 'MovieBox' + (language && language !== 'Original' ? ' [' + language + ']' : '') + ' | ' + quality;
-  var type = url.indexOf('.m3u8') !== -1 ? 'hls' : (url.indexOf('.mp4') !== -1 || url.indexOf('.mkv') !== -1 ? 'video' : null);
+  var fmt = 'video';
+  if (dl.url.indexOf('.m3u8') !== -1) fmt = 'hls';
+  else if (dl.url.indexOf('.mp4') !== -1 || dl.url.indexOf('.mkv') !== -1) fmt = 'video';
   return {
     name: name,
     title: quality,
-    url: url,
+    url: dl.url,
     quality: quality,
-    type: type,
-    headers: { Referer: REFERER_SPOOF + '/', Origin: REFERER_SPOOF },
-    provider: 'moviebox',
-    behaviorHints: { bingeGroup: 'moviebox', notWebReady: false }
+    type: fmt,
+    headers: { Referer: 'https://fmoviesunblocked.net/', Origin: 'https://fmoviesunblocked.net' }
   };
 }
 
 function getStreams(tmdbId, type, season, episode) {
-  return __async(this, null, function*() {
-    var mediaType = type === 'series' || type === 'tv' ? 'tv' : 'movie';
-    var isTv = mediaType === 'tv';
-    var se = isTv && season != null ? parseInt(season, 10) : null;
-    var ep = isTv && episode != null ? parseInt(episode, 10) : null;
+  var mediaType = type === 'series' || type === 'tv' ? 'tv' : 'movie';
+  var isTv = mediaType === 'tv';
+  var se = isTv && season != null ? parseInt(season, 10) : null;
+  var ep = isTv && episode != null ? parseInt(episode, 10) : null;
 
-    var cacheKey = 'mb_' + tmdbId + '_' + mediaType + '_' + se + '_' + ep;
-    var cached = cacheGet(cacheKey);
-    if (cached) return cached;
+  return fetchTmdbInfo(tmdbId, mediaType).then(function(info) {
+    if (!info || !info.title) return [];
 
-    try {
-      var info = yield getTmdbInfo(tmdbId, mediaType);
-      if (!info.title) return [];
-      var subjects = yield searchMovieBox(info.title, mediaType);
-      if (!subjects.length) return [];
+    return searchMovieBox(info.title, mediaType).then(function(items) {
+      if (!items.length) return [];
+
+      var matches = findMatch(items, info.title);
+      if (!matches.length) return [];
 
       var seenUrls = {};
-      var streams = [];
+      var promises = [];
 
-      for (var i = 0; i < subjects.length; i++) {
-        var sub = subjects[i];
-        try {
-          var downloads = yield fetchDownloads(sub.id, sub.detailPath, se, ep);
-          for (var j = 0; j < downloads.length; j++) {
-            var dl = downloads[j];
-            if (!dl.url || seenUrls[dl.url]) continue;
-            seenUrls[dl.url] = true;
-            var stream = buildStream(dl, sub.language);
-            if (stream) streams.push(stream);
-          }
-        } catch (err) {
-          if (typeof console !== 'undefined') console.error(TAG, 'Error subject ' + sub.id + ':', err.message);
-        }
+      for (var i = 0; i < matches.length; i++) {
+        (function(match) {
+          promises.push(fetchDownloads(match.id, match.detailPath, se, ep).then(function(downloads) {
+            var result = [];
+            for (var j = 0; j < downloads.length; j++) {
+              var dl = downloads[j];
+              if (!dl.url || seenUrls[dl.url]) continue;
+              seenUrls[dl.url] = true;
+              var stream = buildStream(dl, match.language);
+              if (stream) result.push(stream);
+            }
+            return result;
+          }));
+        })(matches[i]);
       }
 
-      streams.sort(function(a, b) {
-        var pa = parseInt(a.quality) || 0;
-        var pb = parseInt(b.quality) || 0;
-        return pb - pa;
+      return Promise.all(promises).then(function(results) {
+        var streams = [];
+        for (var i = 0; i < results.length; i++) {
+          for (var j = 0; j < results[i].length; j++) {
+            streams.push(results[i][j]);
+          }
+        }
+        streams.sort(function(a, b) {
+          return (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0);
+        });
+        return streams;
       });
-
-      if (streams.length) cacheSet(cacheKey, streams);
-      return streams;
-
-    } catch (err) {
-      if (typeof console !== 'undefined') console.error(TAG, 'Fatal error:', err.message);
-      return [];
-    }
+    });
+  }).catch(function(err) {
+    return [];
   });
 }
 
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { getStreams: getStreams };
-} else {
-  globalThis.getStreams = getStreams;
-}
+module.exports = { getStreams: getStreams };
