@@ -1,27 +1,17 @@
+var VER = 'v6';
+
 function getStreams(tmdbId, mediaType, season, episode) {
   try {
-    var debug = [];
-    function d(m) { debug.push({ name: 'DBG: '+m, title: 'dbg', url: 'https://example.com/d', quality: 'dbg' }); }
-    d('called id='+tmdbId+' type='+mediaType);
-
-    d('fetch='+(typeof fetch));
-    d('Promise='+(typeof Promise));
-    d('module='+(typeof module));
-
     if (typeof fetch === 'undefined') {
-      return Promise.resolve(debug);
+      return Promise.resolve([{ name: '['+VER+'] NO_FETCH - fetch is undefined in this runtime', title: 'fetch unavailable', url: 'https://example.com/nope', quality: 'error' }]);
     }
-
-    d('fetch exists, calling httpbin');
     return fetch('https://httpbin.org/get').then(function(r) {
-      d('httpbin status='+r.status);
-      return Promise.resolve(debug);
+      return [{ name: '['+VER+'] FETCH_OK status=' + r.status, title: 'fetch works', url: 'https://example.com/ok', quality: 'ok' }];
     }).catch(function(e) {
-      d('fetch err: '+e.message);
-      return Promise.resolve(debug);
+      return [{ name: '['+VER+'] FETCH_ERR: ' + e.message, title: 'fetch error', url: 'https://example.com/err', quality: 'error' }];
     });
   } catch(e) {
-    return Promise.resolve([{ name: 'CRASH: '+e.message, title: 'crash', url: 'https://example.com/c', quality: 'crash' }]);
+    return Promise.resolve([{ name: '['+VER+'] CRASH: ' + e.message, title: 'crash', url: 'https://example.com/c', quality: 'crash' }]);
   }
 }
 
