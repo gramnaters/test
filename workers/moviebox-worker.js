@@ -1,5 +1,5 @@
 // MovieBox Cloudflare Worker
-// Caches server-side for instant responses across all users
+// Uses built-in Cache API (no KV setup needed)
 
 const TMDB_KEY = 'd131017ccc6e5462a81c9304d21476de';
 const H5_API = 'https://h5-api.aoneroom.com';
@@ -12,24 +12,17 @@ const corsHeaders = {
   'Content-Type': 'application/json'
 };
 
-function genToken() {
-  const ts = Math.floor(Date.now() / 1000).toString();
-  const rev = ts.split('').reverse().join('');
-  // MD5 using Web Crypto
-  return ts + '.' + rev;
-}
-
-function md5(str) {
+async function md5(str) {
   const bytes = new TextEncoder().encode(str);
-  return crypto.subtle.digest('MD5', bytes).then(buf => {
-    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-  });
+  const hash = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('').substring(0, 32);
 }
 
-function genClientToken() {
+async function genClientToken() {
   const ts = Math.floor(Date.now() / 1000).toString();
   const rev = ts.split('').reverse().join('');
-  return md5(rev).then(hash => ts + '.' + hash);
+  const hash = await md5(rev);
+  return ts + '.' + hash;
 }
 
 function apiHeaders(token, extra) {
@@ -160,8 +153,65 @@ function buildStreams(downloads, lang) {
   return result;
 }
 
+async function fetchStreams(tmdbId, type, season, episode) {
+  const details = await getTmdb(tmdbId, type);
+  if (!details) return [];
+
+  const token = await genClientToken();
+  const searchRes = await apiCall('POST', `${H5_API}/wefeed-h5api-bff/subject/search`, {
+    keyword: details.title, page: 1, perPage: 28, subjectType: 0
+  }, apiHeaders(token));
+
+  const items = (searchRes && searchRes.data && searchRes.data.items) || [];
+  const matches = findMatches(items, details.title, details.year, details.mediaType);
+  if (matches.length === 0) return [];
+
+  const isTv = details.mediaType === 'tv';
+  const se = isTv ? (parseInt(season) || 1) : 0;
+  const ep = isTv ? (parseInt(episode) || 1) : 0;
+
+  const seenIds = {};
+  const unique = matches.filter(m => {
+    if (seenIds[m.id]) return false;
+    seenIds[m.id] = true;
+    return true;
+  });
+
+  let detailData = null;
+  if (isTv && unique.length > 0) {
+    detailData = await getDetail(token, unique[0].dp);
+  }
+
+  const allStreams = [];
+  const promises = unique.map(async (m) => {
+    let useSe = se, useEp = ep;
+    if (isTv && detailData && detailData.resource && detailData.resource.seasons) {
+      for (const s of detailData.resource.seasons) {
+        if (s.se == se) {
+          if (s.maxEp > 0 && ep > s.maxEp) useEp = s.maxEp;
+          break;
+        }
+      }
+    }
+    const dls = await getDownloads(token, m.id, useSe, useEp, m.dp);
+    return buildStreams(dls, m.lang);
+  });
+
+  const results = await Promise.all(promises);
+  for (const r of results) allStreams.push(...r);
+
+  allStreams.sort((a, b) => {
+    const qa = parseInt(a.quality) || 0;
+    const qb = parseInt(b.quality) || 0;
+    if (qb !== qa) return qb - qa;
+    return a.name.includes('Original') ? -1 : 1;
+  });
+
+  return allStreams;
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request) {
     const url = new URL(request.url);
 
     if (request.method === 'OPTIONS') {
@@ -181,72 +231,21 @@ export default {
       }
 
       try {
-        const cacheKey = `streams:${tmdbId}:${type}:${season || 0}:${episode || 0}`;
-        const cached = await env.CACHE.get(cacheKey, 'json');
+        const cacheKey = `https://moviebox-cache.dev/${tmdbId}:${type}:${season || 0}:${episode || 0}`;
+        const cache = caches.default;
+        const cached = await cache.match(cacheKey);
         if (cached) {
-          return new Response(JSON.stringify(cached), { headers: corsHeaders });
+          const data = await cached.json();
+          return new Response(JSON.stringify(data), { headers: corsHeaders });
         }
 
-        const token = await genClientToken();
-        const details = await getTmdb(tmdbId, type);
-        if (!details) {
-          return new Response(JSON.stringify({ streams: [] }), { headers: corsHeaders });
-        }
+        const streams = await fetchStreams(tmdbId, type, season, episode);
+        const response = { streams };
 
-        const searchRes = await apiCall('POST', `${H5_API}/wefeed-h5api-bff/subject/search`, {
-          keyword: details.title, page: 1, perPage: 28, subjectType: 0
-        }, apiHeaders(token));
-
-        const items = (searchRes && searchRes.data && searchRes.data.items) || [];
-        const matches = findMatches(items, details.title, details.year, details.mediaType);
-
-        if (matches.length === 0) {
-          return new Response(JSON.stringify({ streams: [] }), { headers: corsHeaders });
-        }
-
-        const isTv = details.mediaType === 'tv';
-        const se = isTv ? (parseInt(season) || 1) : 0;
-        const ep = isTv ? (parseInt(episode) || 1) : 0;
-
-        const seenIds = {};
-        const unique = matches.filter(m => {
-          if (seenIds[m.id]) return false;
-          seenIds[m.id] = true;
-          return true;
+        const cacheResponse = new Response(JSON.stringify(response), {
+          headers: { ...corsHeaders, 'Cache-Control': 'max-age=1200' }
         });
-
-        let detailData = null;
-        if (isTv && unique.length > 0) {
-          detailData = await getDetail(token, unique[0].dp);
-        }
-
-        const allStreams = [];
-        const promises = unique.map(async (m) => {
-          let useSe = se, useEp = ep;
-          if (isTv && detailData && detailData.resource && detailData.resource.seasons) {
-            for (const s of detailData.resource.seasons) {
-              if (s.se == se) {
-                if (s.maxEp > 0 && ep > s.maxEp) useEp = s.maxEp;
-                break;
-              }
-            }
-          }
-          const dls = await getDownloads(token, m.id, useSe, useEp, m.dp);
-          return buildStreams(dls, m.lang);
-        });
-
-        const results = await Promise.all(promises);
-        for (const r of results) allStreams.push(...r);
-
-        allStreams.sort((a, b) => {
-          const qa = parseInt(a.quality) || 0;
-          const qb = parseInt(b.quality) || 0;
-          if (qb !== qa) return qb - qa;
-          return a.name.includes('Original') ? -1 : 1;
-        });
-
-        const response = { streams: allStreams };
-        await env.CACHE.put(cacheKey, JSON.stringify(response), { expirationTtl: 1200 });
+        await cache.put(cacheKey, cacheResponse.clone());
 
         return new Response(JSON.stringify(response), { headers: corsHeaders });
       } catch (err) {
@@ -258,7 +257,7 @@ export default {
 
     return new Response(JSON.stringify({
       name: 'MovieBox Worker',
-      endpoints: ['/streams?tmdb_id=XXX&type=movie|tv&season=1&episode=1']
+      usage: '/streams?tmdb_id=XXX&type=movie|tv&season=1&episode=1'
     }), { headers: corsHeaders });
   }
 };
